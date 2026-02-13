@@ -191,6 +191,11 @@ class EpDispatchCombineHandle {
   void LaunchCombineRecv(KernelType, int blockNum = -1, int warpPerBlock = -1, hipStream_t = 0);
   void LaunchReset(hipStream_t = 0);
 
+  // Dispatch-free all-reduce: sums input[M,K] across all ranks via P2P.
+  // Output is placed in shmemCombineOutTokMemObj.
+  void LaunchIntraNodeAllReduce(int numTokens, int blockNum = -1, int warpPerBlock = -1,
+                                hipStream_t = 0);
+
   index_t GetCurRankNumToken() const { return curRankNumToken; }
 
  private:

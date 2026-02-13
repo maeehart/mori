@@ -36,6 +36,7 @@
 #include "mori/application/application.hpp"
 #include "mori/core/profiler/constants.hpp"
 #include "mori/io/io.hpp"
+#include "mori/ops/allreduce/allreduce.hpp"
 #include "mori/ops/ops.hpp"
 #include "mori/pybind/profiler_registry.hpp"
 #include "mori/shmem/shmem.hpp"
@@ -330,6 +331,25 @@ void LaunchReset(mori::moe::EpDispatchCombineHandle& handle) {
   handle.LaunchReset(at::cuda::getCurrentHIPStream());
 }
 
+torch::Tensor LaunchAllReduce(mori::moe::EpDispatchCombineHandle& handle,
+                              const torch::Tensor& input, int blockNum = -1,
+                              int warpPerBlock = -1) {
+  assert(input.is_contiguous());
+  int numTokens = input.size(0);
+
+  handle.inputType = mori::ScalarTypeToHipDataType(input.scalar_type());
+  handle.inpTokenBuf = input.data_ptr();
+  handle.LaunchIntraNodeAllReduce(numTokens, blockNum, warpPerBlock,
+                                  at::cuda::getCurrentHIPStream());
+
+  auto options =
+      torch::TensorOptions().dtype(input.scalar_type()).device(torch::kCUDA);
+  torch::Tensor out = torch::from_blob(
+      handle.shmemCombineOutTokMemObj->Get(),
+      {handle.config.maxNumInpTokenPerRank, handle.config.hiddenDim}, options);
+  return out;
+}
+
 torch::Tensor GetDispatchSrcTokenId(mori::moe::EpDispatchCombineHandle& handle) {
   auto options = torch::TensorOptions()
                      .dtype(mori::GetTorchDataType<mori::moe::index_t>())
@@ -422,6 +442,9 @@ void DeclareEpDispatchCombineHandle(pybind11::module& m) {
   funcName = std::string("launch_reset");
   m.def(funcName.c_str(), &LaunchReset);
 
+  funcName = std::string("launch_allreduce");
+  m.def(funcName.c_str(), &LaunchAllReduce);
+
   funcName = std::string("get_cur_rank_num_token");
   m.def(funcName.c_str(), &mori::moe::EpDispatchCombineHandle::GetCurRankNumToken);
 
@@ -444,6 +467,35 @@ void DeclareEpDispatchCombineHandle(pybind11::module& m) {
   funcName = std::string("get_debug_time_offset");
   m.def(funcName.c_str(), &GetDebugTimeOffset);
 #endif
+}
+
+/* ─── MoriAllReduceHandle bindings ─────────────────────────────────────── */
+torch::Tensor MoriAllReduceLaunch(mori::allreduce::MoriAllReduceHandle& handle,
+                                  const torch::Tensor& input, int blockNum = -1,
+                                  int warpPerBlock = -1) {
+  assert(input.is_contiguous());
+  int numTokens = input.size(0);
+
+  handle.Launch(input.data_ptr(), mori::ScalarTypeToHipDataType(input.scalar_type()), numTokens,
+                blockNum, warpPerBlock, at::cuda::getCurrentHIPStream());
+
+  auto options = torch::TensorOptions().dtype(input.scalar_type()).device(torch::kCUDA);
+  torch::Tensor out =
+      torch::from_blob(handle.OutputPtr(), {handle.maxNumTokens, handle.hiddenDim}, options);
+  return out;
+}
+
+void DeclareMoriAllReduceHandle(pybind11::module& m) {
+  pybind11::class_<mori::allreduce::MoriAllReduceHandle>(m, "MoriAllReduceHandle")
+      .def(pybind11::init<int, int, int, int>(), py::arg("rank"), py::arg("world_size"),
+           py::arg("max_num_tokens"), py::arg("hidden_dim"))
+      .def_readonly("rank", &mori::allreduce::MoriAllReduceHandle::rank)
+      .def_readonly("world_size", &mori::allreduce::MoriAllReduceHandle::worldSize)
+      .def_readonly("max_num_tokens", &mori::allreduce::MoriAllReduceHandle::maxNumTokens)
+      .def_readonly("hidden_dim", &mori::allreduce::MoriAllReduceHandle::hiddenDim);
+
+  m.def("mori_allreduce_launch", &MoriAllReduceLaunch, py::arg("handle"), py::arg("input"),
+        py::arg("block_num") = -1, py::arg("warp_per_block") = -1);
 }
 
 void Cast(const torch::Tensor& input, const torch::Tensor& output) {
@@ -470,6 +522,8 @@ int64_t ShmemFinalize() { return mori::shmem::ShmemFinalize(); }
 int64_t ShmemModuleInit(uint64_t hipModule) {
   return mori::shmem::ShmemModuleInit(reinterpret_cast<void*>(hipModule));
 }
+
+bool ShmemIsInitialized() { return mori::shmem::ShmemIsInitialized(); }
 
 int64_t ShmemMyPe() { return mori::shmem::ShmemMyPe(); }
 
@@ -594,6 +648,7 @@ void RegisterMoriOps(py::module_& m) {
       (PyObject*)torch::getTHPDtype(c10::CppTypeToScalarType<mori::moe::index_t>::value));
 
   DeclareEpDispatchCombineHandle(m);
+  DeclareMoriAllReduceHandle(m);
 
   m.def("get_cur_device_wall_clock_freq_mhz", &GetCurDeviceWallClockFreqMhz,
         "Returns clock frequency of current device's wall clock");
@@ -625,6 +680,9 @@ void RegisterMoriShmem(py::module_& m) {
         "Initialize globalGpuStates in a specific HIP module (for Triton kernels)");
 
   // Query APIs
+  m.def("shmem_is_initialized", &ShmemIsInitialized,
+        "Check if shmem has been initialized (safe to call at any time)");
+
   m.def("shmem_mype", &ShmemMyPe, "Get my PE (process element) ID");
 
   m.def("shmem_npes", &ShmemNPes, "Get number of PEs");
@@ -659,6 +717,7 @@ void RegisterMoriShmem(py::module_& m) {
         "Returns P2P accessible address if connection uses P2P transport.");
   m.def("shmem_torch_process_group_init", &ShmemTorchProcessGroupInit);
   m.def("shmem_finalize", &ShmemFinalize);
+  m.def("shmem_is_initialized", &ShmemIsInitialized);
   m.def("shmem_mype", &ShmemMyPe);
   m.def("shmem_npes", &ShmemNPes);
   m.def("shmem_num_qp_per_pe", &ShmemNumQpPerPe);

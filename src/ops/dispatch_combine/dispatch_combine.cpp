@@ -30,6 +30,7 @@
 #include "mori/shmem/shmem.hpp"
 #include "mori/utils/hip_helper.hpp"
 #include "mori/utils/mori_log.hpp"
+#include "src/ops/allreduce/allreduce_intranode.hpp"
 #include "src/ops/dispatch_combine/convert.hpp"
 #include "src/ops/dispatch_combine/internode.hpp"
 #include "src/ops/dispatch_combine/internode_v1.hpp"
@@ -600,6 +601,60 @@ void EpDispatchCombineHandle::LaunchConvertCombineInputKernel(
   }
 }
 #endif  // ENABLE_STANDARD_MOE_ADAPT
+
+/* ---------------------------------------------------------------------------------------------- */
+/*                                     All-Reduce (dispatch-free EP)                              */
+/* ---------------------------------------------------------------------------------------------- */
+void EpDispatchCombineHandle::LaunchIntraNodeAllReduce(int numTokens, int blockNum, int warpPerBlock,
+                                                       hipStream_t stream) {
+  const size_t actualWarpNumPerBlock =
+      (warpPerBlock <= 0) ? config.warpNumPerBlock : warpPerBlock;
+  dim3 grid((blockNum <= 0) ? config.blockNum : blockNum);
+  dim3 block(warpSize * actualWarpNumPerBlock);
+
+  // Shared memory: one T* pointer per PE per warp.
+  size_t sharedMemSize = actualWarpNumPerBlock * AR_MAX_GPUS * sizeof(void*);
+
+  auto fillAndLaunch = [&](auto* dummy) {
+    using T = std::remove_pointer_t<decltype(dummy)>;
+    EpAllReduceArgs<T> args;
+    args.inputBuf = reinterpret_cast<T*>(inpTokenBuf);
+    args.outputBuf = shmemCombineOutTokMemObj->GetAs<T*>();
+    args.shmemInpBuf = shmemCombineInpTokMemObj;
+    args.shmemOutBuf = shmemCombineOutTokMemObj;
+    args.crossDeviceBarrierMemObj = crossDeviceBarrierMemObj;
+    args.crossDeviceBarrierFlag = crossDeviceBarrierFlag;
+    args.gridBarrier = combineGridBarrier;
+    args.rank = config.rank;
+    args.worldSize = config.worldSize;
+    args.numTokens = numTokens;
+    args.hiddenDim = config.hiddenDim;
+
+    EpAllReduceIntraNodeKernel<T><<<grid, block, sharedMemSize, stream>>>(args);
+  };
+
+  switch (inputType) {
+    case HIP_R_16BF:
+      fillAndLaunch(static_cast<hip_bfloat16*>(nullptr));
+      break;
+    case HIP_R_32F:
+      fillAndLaunch(static_cast<float*>(nullptr));
+      break;
+#ifdef MORI_FP8_TYPE_OCP_ENABLED
+    case HIP_R_8F_E4M3:
+      fillAndLaunch(static_cast<__hip_fp8_e4m3*>(nullptr));
+      break;
+#endif
+#ifdef MORI_FP8_TYPE_FNUZ_ENABLED
+    case HIP_R_8F_E4M3_FNUZ:
+      fillAndLaunch(static_cast<__hip_fp8_e4m3_fnuz*>(nullptr));
+      break;
+#endif
+    default:
+      assert(false && "Unsupported input type for all-reduce");
+      break;
+  }
+}
 
 // no need for a separate reset kernel now
 void EpDispatchCombineHandle::LaunchReset(hipStream_t stream) {}

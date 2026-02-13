@@ -149,6 +149,9 @@ class EpDispatchCombineOp:
         self._combine_standard_moe_func = _cpp_dispatch_combine_factory(
             "launch_combine_standard_moe", allow_missing=True
         )
+        self._allreduce_func = _cpp_dispatch_combine_factory(
+            "launch_allreduce", allow_missing=True
+        )
         self._reset_func = _cpp_dispatch_combine_factory("launch_reset")
         self._convert_dispatch_output_func = _cpp_dispatch_combine_factory(
             "convert_dispatch_output", allow_missing=True
@@ -464,6 +467,41 @@ class EpDispatchCombineOp:
             packed_recv_layout_range,
             block_num,
             warp_per_block,
+        )
+
+    def allreduce(
+        self,
+        input: torch.Tensor,
+        block_num: int = -1,
+        warp_per_block: int = -1,
+    ):
+        """P2P intra-node all-reduce: sum input[M, K] across all ranks.
+
+        Uses symmetric shared memory and XGMI P2P reads to perform an
+        efficient all-reduce without going through RCCL/NCCL.
+
+        Args:
+            input: [M, K] tensor to all-reduce (bf16 or fp32).
+            block_num: Override config.block_num if > 0.
+            warp_per_block: Override config.warp_num_per_block if > 0.
+
+        Returns:
+            Output tensor [max_num_inp_token_per_rank, hidden_dim] in
+            symmetric memory.  Caller should slice [:M] if M <
+            max_num_inp_token_per_rank.
+        """
+        if self._allreduce_func is None:
+            raise RuntimeError(
+                "launch_allreduce is not available in this MORI build."
+            )
+        block_num = self.auto_block_num if self.auto_block_num else block_num
+        warp_per_block = (
+            self.auto_warp_per_block
+            if self.auto_warp_per_block
+            else warp_per_block
+        )
+        return self._allreduce_func(
+            self._handle, input, block_num, warp_per_block
         )
 
     def reset(self):

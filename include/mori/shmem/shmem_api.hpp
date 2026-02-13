@@ -63,6 +63,9 @@ int ShmemInitAttr(unsigned int flags, mori_shmem_init_attr_t* attr);
 
 int ShmemFinalize();
 
+/// Returns true if shmem has been initialized (safe to call at any time).
+bool ShmemIsInitialized();
+
 int ShmemModuleInit(void* hipModule);
 
 int ShmemMyPe();

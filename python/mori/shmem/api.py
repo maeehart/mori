@@ -67,6 +67,17 @@ def shmem_init_attr(flags: int, rank: int, nranks: int, unique_id: bytes):
     return mori_cpp.shmem_init_attr(flags, rank, nranks, unique_id)
 
 
+def shmem_is_initialized() -> bool:
+    """Check if shmem has been initialized.
+    
+    Safe to call at any time, even before initialization.
+    
+    Returns:
+        True if shmem has been initialized, False otherwise.
+    """
+    return mori_cpp.shmem_is_initialized()
+
+
 def shmem_finalize():
     """Finalize shmem and cleanup resources.
     

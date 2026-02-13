@@ -647,6 +647,11 @@ int ShmemTorchProcessGroupInit(const std::string& groupName) {
 /*                                      Query APIs                                               */
 /* ---------------------------------------------------------------------------------------------- */
 
+bool ShmemIsInitialized() {
+  ShmemStates* states = ShmemStatesSingleton::GetInstance();
+  return states->status == ShmemStatesStatus::Initialized;
+}
+
 int ShmemMyPe() {
   ShmemStates* states = ShmemStatesSingleton::GetInstance();
   return states->bootStates->rank;
